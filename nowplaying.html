@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ink Now Playing</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Paytone+One&family=Rubik:wght@500;700&display=swap" rel="stylesheet">
+<!--
+  INK NOW PLAYING (name tag): a small Spotify "now playing" tag for OBS.
+  It stays on screen the whole time music is playing, and is only as wide as the song needs.
+
+  SETUP (one time)
+  1. Create an app at https://developer.spotify.com/dashboard
+  2. Add a Redirect URI that is EXACTLY the address you open this page at
+     (for GitHub Pages that looks like https://yourname.github.io/yourrepo/nowplaying.html).
+  3. Paste the app's Client ID into CLIENT_ID below (just between the quote marks on that one line).
+  4. Put the file online (GitHub Pages works).
+  5. In OBS add a Browser Source with that same address, Width 1200 and Height 120.
+     The tag centers itself inside the source, so to put it at the top middle of your screen:
+     drag the source near the top, then right-click it > Transform > Center Horizontally.
+     To move the tag anywhere else, just drag the source.
+  6. Right-click the source > Interact > click "Connect Spotify" and approve (once).
+
+  SIZE: 1 is sized for a 1080p canvas. Change SIZE below to make the tag bigger or smaller.
+
+  PREVIEW: while CLIENT_ID is unchanged (or if you add ?demo to the address),
+  the widget cycles through fake songs so you can see the look.
+
+  TROUBLESHOOTING: add ?debug to the end of the address (nowplaying.html?debug) and a small
+  status box shows what the widget is doing and any errors.
+-->
+<style>
+  :root { --a:#ff3d9a; --b:#c6ff1a; --ink:#1b1620; --tan:#D2B48C; --u:1; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html, body { width:100%; height:100%; overflow:hidden; background:transparent; }
+  body { font-family:'Rubik', system-ui, sans-serif; color:var(--ink); }
+
+  /* Everything inside the stage is sized in em. 1em = 10 * --u pixels. */
+  #stage {
+    position:absolute; left:0; top:0; right:0; bottom:0;
+    font-size:calc(var(--u) * 10px);
+    display:flex; align-items:center; justify-content:center;
+  }
+
+  /* the tag and its splats; only as wide as the text, never wider than the source */
+  #wrap {
+    position:relative; min-width:0; max-width:calc(100% - 14em);
+    transition:opacity .35s ease, transform .45s cubic-bezier(.2,1.2,.4,1);
+  }
+  #stage.hidden #wrap { opacity:0; transform:translateY(-1.2em); }
+
+  /* ---------- ink splats poking out from behind the tag's ends ---------- */
+  .splat { position:absolute; z-index:0; pointer-events:none; }
+  .splat svg { display:block; width:100%; height:100%; overflow:visible; fill:currentColor; transform-origin:50% 50%; }
+  /* the easing on each step stays between 0 and 1 so the splat never grows past its peak (1.15) */
+  .splat.pop svg { animation:splatpop .6s linear both; }
+  @keyframes splatpop {
+    0%   { transform:scale(0) rotate(-25deg); animation-timing-function:cubic-bezier(.15,.8,.35,1); }
+    60%  { transform:scale(1.15) rotate(4deg); animation-timing-function:ease-in-out; }
+    100% { transform:scale(1) rotate(0); }
+  }
+  #sp1 { width:8em; height:8em; left:-5.4em;  top:50%; margin-top:-4em;    color:var(--a); }
+  #sp2 { width:7em; height:7em; right:-4.8em; top:40%; margin-top:-3.5em;  color:var(--b); }
+
+  /* ---------- the tag: tan, with bright ink for the outline and shadow ---------- */
+  #tag {
+    position:relative; z-index:1; min-width:0;
+    display:flex; align-items:center; gap:1em;
+    padding:.55em 1.2em .55em .75em;
+    background:var(--tan);
+    border:.3em solid var(--a); border-radius:1.5em;
+    box-shadow:.45em .45em 0 var(--b);
+  }
+  #tag.in { animation:tagin .45s cubic-bezier(.2,.8,.4,1) both; }
+  @keyframes tagin {
+    from { opacity:0; transform:translateY(-.9em) scale(.88); }
+    to   { opacity:1; transform:none; }
+  }
+
+  #note {
+    flex:none; width:3.2em; height:3.2em; border-radius:50%;
+    background:var(--b); box-shadow:.2em .2em 0 var(--a);
+    display:flex; align-items:center; justify-content:center;
+    transform:rotate(-6deg);
+  }
+  #note svg { width:1.95em; height:1.95em; fill:var(--ink); }
+
+  /* song and artist share one line; dark ink on tan so it stays readable when shrunk */
+  #clip { overflow:hidden; white-space:nowrap; min-width:0; padding:.1em 0; }
+  #line { display:inline-block; line-height:1.2; }
+  #title {
+    font-family:'Paytone One','Arial Black',sans-serif;
+    font-size:2.8em;
+  }
+  #artist {
+    font-family:'Rubik', system-ui, sans-serif; font-weight:700; font-size:2.3em;
+    background:var(--a); color:var(--ink);
+    padding:.05em .5em .09em; border-radius:999px; margin-left:.5em;
+  }
+  #artist:empty { display:none; }
+  .scroll { animation:slide var(--dur,10s) ease-in-out infinite alternate; }
+  @keyframes slide {
+    0%, 12%   { transform:translateX(0); }
+    88%, 100% { transform:translateX(var(--shift,0px)); }
+  }
+
+  /* ---------- connect screen (the tag turns into a button) ---------- */
+  #connect { display:none; align-items:center; gap:1em; }
+  #stage.connecting #connect { display:flex; }
+  #stage.connecting #note, #stage.connecting #clip { display:none; }
+  #connectBtn {
+    font-family:'Paytone One','Arial Black',sans-serif; font-size:2.4em;
+    color:var(--ink); background:var(--b);
+    border:.1em solid var(--ink); border-radius:.7em; padding:.1em .7em;
+    box-shadow:.15em .15em 0 var(--a); cursor:pointer; transform:rotate(-1.5deg);
+  }
+  #connectBtn:active { transform:rotate(-1.5deg) translate(.06em,.06em); box-shadow:.09em .09em 0 var(--a); }
+  #msg {
+    font-size:1.6em; color:#fff; background:var(--ink);
+    padding:.2em .7em; border-radius:.5em; max-width:40em;
+  }
+  #msg:empty { display:none; }
+
+  /* ---------- ?debug status box ---------- */
+  #dbg {
+    display:none; position:fixed; left:6px; top:6px; z-index:99;
+    font:12px/1.35 monospace; color:#7CFC7C; background:rgba(0,0,0,.8);
+    padding:5px 8px; border-radius:6px; white-space:pre; max-width:90vw;
+  }
+</style>
+</head>
+<body>
+<div id="stage" class="hidden">
+  <div id="wrap">
+    <div class="splat" id="sp1"></div>
+    <div class="splat" id="sp2"></div>
+    <div id="tag">
+      <div id="note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg></div>
+      <div id="clip"><span id="line"><span id="title"></span><span id="artist"></span></span></div>
+      <div id="connect">
+        <button id="connectBtn" type="button">Connect Spotify</button>
+        <div id="msg"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="dbg"></div>
+
+<script>
+(() => {
+  'use strict';
+
+  /* ================= SETTINGS ================= */
+  const CLIENT_ID = 'e42ada6a1300404089e7209d1a667064';  // from the Spotify developer dashboard
+  const POLL_MS = 3000;                        // how often to ask Spotify what's playing
+  const HIDE_AFTER_MS = 8000;                  // hide the tag after this long with nothing playing (paused, ad, or off)
+  const REDIRECT_URI = '';                     // leave empty to use this page's own address
+  const SIZE = 1;                              // 1 = sized for a 1080p canvas. Try 1.2 for bigger, 0.85 for smaller.
+  /* ============================================ */
+
+  const REDIRECT = REDIRECT_URI || (location.origin + location.pathname);
+  const IS_PLACEHOLDER = !CLIENT_ID || CLIENT_ID.indexOf('YOUR_') === 0;
+  const params = new URLSearchParams(location.search);
+  const DEBUG = params.has('debug');
+
+  // [main ink color, accent ink color]; each song picks one pair.
+  // Text is always dark ink on tan; these bright colors go on the outline, shadow, splats, icon and artist pill.
+  const PALETTES = [
+    ['#ff3d9a', '#c6ff1a'],
+    ['#1fd8ff', '#ff7a1a'],
+    ['#a066ff', '#ffe600'],
+    ['#35e07a', '#ff35d6'],
+    ['#ff5a36', '#27e0c2']
+  ];
+
+  const $ = id => document.getElementById(id);
+  const stage = $('stage'), tagEl = $('tag'), clipEl = $('clip'), lineEl = $('line');
+  const titleEl = $('title'), artistEl = $('artist');
+  const splats = [$('sp1'), $('sp2')];
+  const connectBtn = $('connectBtn'), msg = $('msg'), dbgEl = $('dbg');
+
+  /* ---------- debug box ---------- */
+  const dbgInfo = {};
+  function dbg(k, v) {
+    if (!DEBUG) return;
+    dbgInfo[k] = v;
+    dbgEl.style.display = 'block';
+    dbgEl.textContent = Object.keys(dbgInfo).map(x => x + ': ' + dbgInfo[x]).join('\n');
+  }
+  window.addEventListener('error', e => dbg('error', e.message));
+  window.addEventListener('unhandledrejection', e => dbg('error', (e.reason && e.reason.message) || e.reason));
+
+  /* ---------- tiny helpers ---------- */
+  const f = x => x.toFixed(1);
+  function hashStr(s) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h;
+  }
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function retrigger(el, cls) { el.classList.remove(cls); void el.offsetWidth; el.classList.add(cls); }
+
+  const store = {
+    get(k) { try { return localStorage.getItem('inknp_' + k); } catch (e) { return null; } },
+    set(k, v) { try { localStorage.setItem('inknp_' + k, v); } catch (e) {} },
+    del(k) { try { localStorage.removeItem('inknp_' + k); } catch (e) {} }
+  };
+
+  /* ---------- sizing ----------
+     The tag is the same size no matter how big the source is. It only shrinks if the source is too
+     short for it, so the tag and its splats are never cut off. */
+  const NEED_H = 112;                       // height the tag and its splats need, in units
+  let geom = { W: 1200, H: 120, u: 1 };
+  function layout() {
+    const W = stage.clientWidth || window.innerWidth || 1200;
+    const H = stage.clientHeight || window.innerHeight || 120;
+    const u = Math.max(0.3, Math.min(SIZE, H / NEED_H));
+    geom = { W, H, u };
+    stage.style.setProperty('--u', u.toFixed(3));
+    dbg('source size', W + ' x ' + H + '   scale ' + u.toFixed(2));
+  }
+
+  /* ---------- procedural ink splat ---------- */
+  function splatSVG(seed) {
+    const rnd = mulberry32(seed);
+    const n = 13, R = 62, pts = [];
+    for (let i = 0; i < n; i++) {
+      const ang = (i / n) * Math.PI * 2 + (rnd() - 0.5) * 0.25;
+      const spike = rnd() < 0.42;
+      const rad = R * (spike ? 1.15 + rnd() * 0.55 : 0.7 + rnd() * 0.25);
+      pts.push([Math.cos(ang) * rad, Math.sin(ang) * rad]);
+    }
+    let d = `M ${f(pts[0][0])} ${f(pts[0][1])}`;
+    for (let i = 0; i < n; i++) {
+      const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n];
+      const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+      const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+      d += ` C ${f(c1[0])} ${f(c1[1])}, ${f(c2[0])} ${f(c2[1])}, ${f(p2[0])} ${f(p2[1])}`;
+    }
+    d += ' Z';
+    let drops = '';
+    const count = 4 + Math.floor(rnd() * 3);
+    for (let i = 0; i < count; i++) {
+      const ang = rnd() * Math.PI * 2, dist = R * (1.4 + rnd() * 0.55), r = 3 + rnd() * 6;
+      drops += `<circle cx="${f(Math.cos(ang) * dist)}" cy="${f(Math.sin(ang) * dist)}" r="${f(r)}"/>`;
+    }
+    return `<svg viewBox="-110 -110 220 220" xmlns="http://www.w3.org/2000/svg"><path d="${d}"/>${drops}</svg>`;
+  }
+
+  let splashN = 0;
+  function splash(seed) {
+    splashN++;
+    const s = (seed + splashN * 7919) >>> 0;
+    splats.forEach((el, i) => {
+      el.innerHTML = splatSVG((s ^ (i * 0x9e3779b9)) >>> 0);
+      retrigger(el, 'pop');
+    });
+  }
+
+  function setPalette(seed) {
+    const pal = PALETTES[seed % PALETTES.length];
+    stage.style.setProperty('--a', pal[0]);
+    stage.style.setProperty('--b', pal[1]);
+  }
+
+  /* ---------- the line scrolls back and forth only when it is too long to fit ---------- */
+  function fit() {
+    lineEl.classList.remove('scroll');
+    lineEl.style.removeProperty('--shift');
+    const over = lineEl.offsetWidth - clipEl.clientWidth;
+    if (over > 2) {
+      lineEl.style.setProperty('--shift', `-${over + 8}px`);
+      lineEl.style.setProperty('--dur', `${Math.max(8, over / (30 * geom.u) + 4)}s`);
+      lineEl.classList.add('scroll');
+    }
+  }
+  let resizeTimer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { layout(); fit(); }, 150);
+  });
+
+  /* ---------- show a track ---------- */
+  let currentKey = null;
+  function showTrack(t) {
+    const changed = t.id !== currentKey;
+    const wasOut = stage.classList.contains('hidden') || stage.classList.contains('connecting');
+    if (changed) {
+      currentKey = t.id;
+      setPalette(hashStr(String(t.id)));
+      titleEl.textContent = t.title;
+      artistEl.textContent = t.artist;
+    }
+    if (changed || wasOut) {
+      splash(hashStr(String(currentKey)));
+      retrigger(tagEl, 'in');
+      requestAnimationFrame(fit);
+    }
+  }
+  function setVisible(v) { stage.classList.toggle('hidden', !v); }
+
+  /* ---------- Spotify login (PKCE, no secret needed) ---------- */
+  const b64url = buf => btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  function randomString(len) {
+    const a = new Uint8Array(len);
+    crypto.getRandomValues(a);
+    return b64url(a).slice(0, len);
+  }
+
+  async function startAuth() {
+    try {
+      const verifier = randomString(96);
+      const challenge = b64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier)));
+      store.set('verifier', verifier);
+      const p = new URLSearchParams({
+        client_id: CLIENT_ID,
+        response_type: 'code',
+        redirect_uri: REDIRECT,
+        code_challenge_method: 'S256',
+        code_challenge: challenge,
+        scope: 'user-read-currently-playing'
+      });
+      location.href = 'https://accounts.spotify.com/authorize?' + p.toString();
+    } catch (e) {
+      showConnect('Could not start login (needs https)');
+    }
+  }
+
+  async function tokenRequest(p) {
+    const r = await fetch('https://accounts.spotify.com/api/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(Object.assign({ client_id: CLIENT_ID }, p))
+    });
+    if (!r.ok) { const err = new Error('token ' + r.status); err.status = r.status; throw err; }
+    const j = await r.json();
+    store.set('access', j.access_token);
+    if (j.refresh_token) store.set('refresh', j.refresh_token);
+    store.set('exp', String(Date.now() + (j.expires_in - 60) * 1000));
+    return j.access_token;
+  }
+
+  function clearTokens() { ['access', 'refresh', 'exp'].forEach(k => store.del(k)); }
+
+  // returns a token, or null if the user needs to connect; throws on temporary trouble
+  async function accessToken() {
+    const a = store.get('access'), exp = Number(store.get('exp') || 0);
+    if (a && Date.now() < exp) return a;
+    const rt = store.get('refresh');
+    if (!rt) return null;
+    try {
+      return await tokenRequest({ grant_type: 'refresh_token', refresh_token: rt });
+    } catch (e) {
+      if (e.status === 400 || e.status === 401) { clearTokens(); return null; }
+      throw e;
+    }
+  }
+
+  async function handleCallback() {
+    const code = params.get('code'), err = params.get('error');
+    if (!code && !err) return;
+    history.replaceState({}, '', location.pathname);
+    if (err) { showConnect('Spotify said: ' + err); return; }
+    try {
+      await tokenRequest({
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: REDIRECT,
+        code_verifier: store.get('verifier') || ''
+      });
+      store.del('verifier');
+    } catch (e) {
+      showConnect('Login failed, please try again');
+    }
+  }
+
+  function showConnect(m) {
+    const already = stage.classList.contains('connecting');
+    setPalette(0);
+    stage.classList.remove('hidden');
+    stage.classList.add('connecting');
+    msg.textContent = m || '';
+    if (!already) { splash(7); retrigger(tagEl, 'in'); }
+  }
+  function hideConnect() { stage.classList.remove('connecting'); msg.textContent = ''; }
+
+  /* ---------- polling ----------
+     The tag stays up for as long as a song is playing. When nothing is playing (paused, an ad,
+     Spotify closed) it waits HIDE_AFTER_MS before sliding away, so a gap between songs never makes it flicker. */
+  let lastPlaying = Date.now();
+  function nothingPlaying(why) {
+    dbg('track', why);
+    if (Date.now() - lastPlaying >= HIDE_AFTER_MS) setVisible(false);
+  }
+
+  function handlePlayback(j) {
+    const it = j && j.item;
+    if (!it || j.currently_playing_type === 'ad') return nothingPlaying('nothing playing');
+    if (!j.is_playing) { dbg('track', it.name + '  (paused)'); return nothingPlaying('paused'); }
+    const artist = it.artists
+      ? it.artists.map(a => a.name).join(', ')
+      : ((it.show && it.show.name) || '');
+    lastPlaying = Date.now();
+    dbg('track', it.name);
+    showTrack({ id: it.id || it.uri || it.name, title: it.name, artist });
+    setVisible(true);
+  }
+
+  async function poll() {
+    let wait = POLL_MS;
+    try {
+      const tok = await accessToken();
+      dbg('login', tok ? 'connected' : 'not connected yet');
+      if (!tok) { showConnect(); return; }          // wait for the user to connect
+      hideConnect();
+      const r = await fetch('https://api.spotify.com/v1/me/player/currently-playing?additional_types=episode', {
+        headers: { Authorization: 'Bearer ' + tok }
+      });
+      dbg('spotify reply', r.status);
+      if (r.status === 204) nothingPlaying('nothing playing');
+      else if (r.status === 200) handlePlayback(await r.json());
+      else if (r.status === 401) { store.del('exp'); wait = 500; }
+      else if (r.status === 429) wait = ((Number(r.headers.get('Retry-After')) || 5) * 1000) + 500;
+      else { console.warn('[ink-now-playing] Spotify returned', r.status); wait = 10000; }
+    } catch (e) {
+      console.warn('[ink-now-playing]', e);
+      dbg('error', e && e.message);
+      wait = 5000;
+    }
+    setTimeout(poll, wait);
+  }
+
+  /* ---------- demo / preview ---------- */
+  function runDemo() {
+    dbg('mode', 'preview (fake songs)');
+    const songs = [
+      { id: 'demo-1', title: 'Paint the Town Loud', artist: 'The Splatter Club' },
+      { id: 'demo-2', title: 'A Very Long Song Title That Has To Scroll Across The Whole Tag When It Cannot Fit On One Line At All', artist: 'Various Artists, Featuring Several Different Names' },
+      { id: 'demo-3', title: 'Midnight Drizzle', artist: 'Lo-Fi Puddles' },
+      { id: 'demo-4', title: 'Ink Rush', artist: 'Tidal Kids' },
+      { id: 'demo-5', title: 'Salmon Run', artist: 'Off the Hook' }
+    ];
+    let i = 0;
+    const next = () => { showTrack(songs[i]); setVisible(true); i = (i + 1) % songs.length; };
+    next();
+    setInterval(next, 9000);
+  }
+
+  /* ---------- go ---------- */
+  connectBtn.addEventListener('click', startAuth);
+  layout();
+
+  (async function main() {
+    if (params.has('demo') || IS_PLACEHOLDER) { runDemo(); return; }
+    dbg('mode', 'live');
+    await handleCallback();
+    poll();
+  })();
+})();
+</script>
+</body>
+</html>
